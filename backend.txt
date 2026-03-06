@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""
+Quantitative Intelligence Platform - Backend Server
+Pure Python stdlib. REST API + background price ticker.
+"""
+import http.server, json, math, random, statistics, time, threading, socketserver
+from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
+
+# ── Market Data Engine ──────────────────────────────────────
+class MarketDataEngine:
+    ASSETS = {
+        "COPPER":{"name":"Copper Futures","price":4.12,"vol":0.22,"sector":"Commodities","type":"commodity","exchange":"COMEX","unit":"$/lb"},
+        "GOLD":{"name":"Gold Futures","price":2340.50,"vol":0.14,"sector":"Commodities","type":"commodity","exchange":"COMEX","unit":"$/oz"},
+        "OIL":{"name":"Crude Oil WTI","price":78.45,"vol":0.28,"sector":"Commodities","type":"commodity","exchange":"NYMEX","unit":"$/bbl"},
+        "URANIUM":{"name":"Uranium Futures","price":92.30,"vol":0.35,"sector":"Commodities","type":"commodity","exchange":"COMEX","unit":"$/lb"},
+        "SILVER":{"name":"Silver Futures","price":27.85,"vol":0.25,"sector":"Commodities","type":"commodity","exchange":"COMEX","unit":"$/oz"},
+        "NATGAS":{"name":"Natural Gas","price":2.65,"vol":0.45,"sector":"Commodities","type":"commodity","exchange":"NYMEX","unit":"$/MMBtu"},
+        "LITHIUM":{"name":"Lithium Carbonate","price":14500,"vol":0.40,"sector":"Commodities","type":"commodity","exchange":"SGX","unit":"$/t"},
+        "WHEAT":{"name":"Wheat Futures","price":5.82,"vol":0.26,"sector":"Commodities","type":"commodity","exchange":"CBOT","unit":"$/bu"},
+        "CORN":{"name":"Corn Futures","price":4.35,"vol":0.24,"sector":"Commodities","type":"commodity","exchange":"CBOT","unit":"$/bu"},
+        "SOYBEAN":{"name":"Soybean Futures","price":11.92,"vol":0.22,"sector":"Commodities","type":"commodity","exchange":"CBOT","unit":"$/bu"},
+        "AAPL":{"name":"Apple Inc.","price":189.50,"vol":0.22,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":2950,"pe":31.2,"eps":6.07,"revenue":383.3,"net_income":97.0,"margin":25.3,"fcf":111.4,"debt":111.1},
+        "MSFT":{"name":"Microsoft Corp.","price":415.20,"vol":0.20,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":3090,"pe":36.5,"eps":11.38,"revenue":227.6,"net_income":82.5,"margin":36.2,"fcf":63.3,"debt":59.9},
+        "NVDA":{"name":"NVIDIA Corp.","price":875.30,"vol":0.45,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":2160,"pe":72.8,"eps":12.02,"revenue":60.9,"net_income":29.8,"margin":48.9,"fcf":27.0,"debt":11.1},
+        "GOOGL":{"name":"Alphabet Inc.","price":153.80,"vol":0.24,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":1920,"pe":25.4,"eps":6.06,"revenue":307.4,"net_income":73.8,"margin":24.0,"fcf":69.5,"debt":28.5},
+        "AMZN":{"name":"Amazon.com Inc.","price":185.60,"vol":0.28,"sector":"Consumer Cyclical","type":"equity","exchange":"NASDAQ","mcap":1930,"pe":58.2,"eps":3.19,"revenue":574.8,"net_income":30.4,"margin":5.3,"fcf":32.2,"debt":67.1},
+        "TSLA":{"name":"Tesla Inc.","price":245.80,"vol":0.55,"sector":"Consumer Cyclical","type":"equity","exchange":"NASDAQ","mcap":782,"pe":62.5,"eps":3.93,"revenue":96.8,"net_income":15.0,"margin":15.5,"fcf":4.4,"debt":5.7},
+        "META":{"name":"Meta Platforms","price":505.40,"vol":0.32,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":1290,"pe":28.7,"eps":17.61,"revenue":134.9,"net_income":39.1,"margin":29.0,"fcf":43.0,"debt":37.0},
+        "JPM":{"name":"JPMorgan Chase","price":198.50,"vol":0.20,"sector":"Financial","type":"equity","exchange":"NYSE","mcap":572,"pe":11.8,"eps":16.82,"revenue":158.1,"net_income":49.6,"margin":31.4,"fcf":35.0,"debt":320.0},
+        "V":{"name":"Visa Inc.","price":281.30,"vol":0.18,"sector":"Financial","type":"equity","exchange":"NYSE","mcap":575,"pe":30.2,"eps":9.31,"revenue":32.7,"net_income":17.3,"margin":52.9,"fcf":18.8,"debt":20.5},
+        "JNJ":{"name":"Johnson & Johnson","price":158.20,"vol":0.15,"sector":"Healthcare","type":"equity","exchange":"NYSE","mcap":381,"pe":22.4,"eps":7.06,"revenue":85.2,"net_income":35.2,"margin":41.3,"fcf":17.6,"debt":30.4},
+        "AMD":{"name":"Advanced Micro Devices","price":178.90,"vol":0.42,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":289,"pe":45.2,"eps":3.96,"revenue":22.7,"net_income":4.3,"margin":18.9,"fcf":5.1,"debt":2.5},
+        "INTC":{"name":"Intel Corp.","price":42.80,"vol":0.35,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":181,"pe":108.0,"eps":0.40,"revenue":54.2,"net_income":1.7,"margin":3.1,"fcf":-3.2,"debt":49.3},
+        "AVGO":{"name":"Broadcom Inc.","price":1385.00,"vol":0.30,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":640,"pe":38.5,"eps":35.97,"revenue":35.8,"net_income":14.1,"margin":39.4,"fcf":17.6,"debt":74.4},
+        "QCOM":{"name":"Qualcomm Inc.","price":168.50,"vol":0.30,"sector":"Technology","type":"equity","exchange":"NASDAQ","mcap":188,"pe":22.1,"eps":7.62,"revenue":35.8,"net_income":7.2,"margin":20.1,"fcf":8.9,"debt":15.6},
+        "BA":{"name":"Boeing Co.","price":205.40,"vol":0.35,"sector":"Industrials","type":"equity","exchange":"NYSE","mcap":125,"pe":-15.2,"eps":-13.52,"revenue":77.8,"net_income":-2.2,"margin":-2.8,"fcf":-3.6,"debt":52.3},
+        "XOM":{"name":"Exxon Mobil","price":108.70,"vol":0.22,"sector":"Energy","type":"equity","exchange":"NYSE","mcap":455,"pe":13.5,"eps":8.05,"revenue":344.6,"net_income":36.0,"margin":10.4,"fcf":33.4,"debt":40.5},
+        "SPY":{"name":"SPDR S&P 500 ETF","price":502.80,"vol":0.15,"sector":"ETF","type":"etf","exchange":"NYSE"},
+        "QQQ":{"name":"Invesco QQQ Trust","price":438.50,"vol":0.20,"sector":"ETF","type":"etf","exchange":"NASDAQ"},
+        "GLD":{"name":"SPDR Gold Shares","price":215.40,"vol":0.14,"sector":"ETF","type":"etf","exchange":"NYSE"},
+        "TLT":{"name":"iShares 20+ Year Treasury","price":92.30,"vol":0.16,"sector":"ETF","type":"etf","exchange":"NASDAQ"},
+        "EEM":{"name":"iShares Emerging Markets","price":42.50,"vol":0.20,"sector":"ETF","type":"etf","exchange":"NYSE"},
+        "SPX":{"name":"S&P 500","price":5021.84,"vol":0.15,"sector":"Index","type":"index","exchange":"US"},
+        "NDX":{"name":"NASDAQ 100","price":17856.30,"vol":0.20,"sector":"Index","type":"index","exchange":"US"},
+        "DJI":{"name":"Dow Jones Industrial","price":38996.40,"vol":0.13,"sector":"Index","type":"index","exchange":"US"},
+        "NKY":{"name":"Nikkei 225","price":39910.82,"vol":0.18,"sector":"Index","type":"index","exchange":"Japan"},
+        "KOSPI":{"name":"KOSPI Index","price":2642.36,"vol":0.19,"sector":"Index","type":"index","exchange":"South Korea"},
+        "NIFTY":{"name":"Nifty 50","price":22147.90,"vol":0.17,"sector":"Index","type":"index","exchange":"India"},
+        "TA125":{"name":"Tel Aviv 125","price":2038.56,"vol":0.16,"sector":"Index","type":"index","exchange":"Israel"},
+        "SHCOMP":{"name":"Shanghai Composite","price":3015.82,"vol":0.21,"sector":"Index","type":"index","exchange":"China"},
+        "SX5E":{"name":"Euro Stoxx 50","price":4988.64,"vol":0.16,"sector":"Index","type":"index","exchange":"Europe"},
+        "FTSE":{"name":"FTSE 100","price":7930.92,"vol":0.14,"sector":"Index","type":"index","exchange":"Europe"},
+        "DAX":{"name":"DAX 40","price":17735.07,"vol":0.17,"sector":"Index","type":"index","exchange":"Europe"},
+        "EURUSD":{"name":"EUR/USD","price":1.0842,"vol":0.08,"sector":"Currency","type":"currency","exchange":"FX"},
+        "GBPUSD":{"name":"GBP/USD","price":1.2645,"vol":0.09,"sector":"Currency","type":"currency","exchange":"FX"},
+        "USDJPY":{"name":"USD/JPY","price":150.25,"vol":0.10,"sector":"Currency","type":"currency","exchange":"FX"},
+        "DXY":{"name":"US Dollar Index","price":104.12,"vol":0.07,"sector":"Currency","type":"currency","exchange":"FX"},
+        "US10Y":{"name":"US 10-Year Treasury","price":4.28,"vol":0.15,"sector":"Bond","type":"bond","exchange":"US"},
+        "US2Y":{"name":"US 2-Year Treasury","price":4.72,"vol":0.12,"sector":"Bond","type":"bond","exchange":"US"},
+        "US30Y":{"name":"US 30-Year Treasury","price":4.45,"vol":0.16,"sector":"Bond","type":"bond","exchange":"US"},
+    }
+    COMPETITORS = {
+        "NVDA":["AMD","INTC","AVGO","QCOM"],"AAPL":["MSFT","GOOGL","META"],"MSFT":["AAPL","GOOGL","AMZN"],
+        "GOOGL":["META","MSFT","AMZN"],"AMZN":["GOOGL","MSFT","META"],"TSLA":["XOM","BA","AMD"],
+        "META":["GOOGL","MSFT","AAPL"],"JPM":["V","JNJ","XOM"],"AMD":["NVDA","INTC","QCOM","AVGO"],
+        "INTC":["AMD","NVDA","QCOM","AVGO"],"AVGO":["QCOM","NVDA","AMD","INTC"],"QCOM":["AVGO","NVDA","AMD","INTC"],
+    }
+    COMMODITY_SD = {
+        "COPPER":{"supply":22.0,"demand":25.5,"unit":"Mt","producers":["Chile","Peru","China","DRC","USA"],"drivers":["Construction","Electronics","EVs","Power Grid","Industrial"]},
+        "GOLD":{"supply":4800,"demand":4700,"unit":"tonnes","producers":["China","Australia","Russia","Canada","USA"],"drivers":["Jewelry","Investment","Central Banks","Technology","Industrial"]},
+        "OIL":{"supply":101.5,"demand":102.2,"unit":"Mb/d","producers":["USA","Saudi Arabia","Russia","Canada","Iraq"],"drivers":["Transport","Industrial","Petrochemicals","Power Gen","Aviation"]},
+        "URANIUM":{"supply":58500,"demand":65200,"unit":"tonnes","producers":["Kazakhstan","Canada","Namibia","Australia","Uzbekistan"],"drivers":["Nuclear Power","Medical","Research","Naval","Space"]},
+        "SILVER":{"supply":31000,"demand":33500,"unit":"tonnes","producers":["Mexico","Peru","China","Poland","Chile"],"drivers":["Solar PV","Electronics","Jewelry","Photography","Medical"]},
+        "NATGAS":{"supply":410,"demand":405,"unit":"Bcf/d","producers":["USA","Russia","Iran","Qatar","China"],"drivers":["Power Gen","Heating","Industrial","LNG Export","Petrochemicals"]},
+        "LITHIUM":{"supply":130,"demand":180,"unit":"kt LCE","producers":["Australia","Chile","China","Argentina","Brazil"],"drivers":["EV Batteries","Grid Storage","Electronics","Ceramics","Lubricants"]},
+        "WHEAT":{"supply":783,"demand":790,"unit":"Mt","producers":["China","India","Russia","USA","France"],"drivers":["Food","Animal Feed","Industrial","Ethanol","Export"]},
+        "CORN":{"supply":1215,"demand":1200,"unit":"Mt","producers":["USA","China","Brazil","Argentina","Ukraine"],"drivers":["Animal Feed","Ethanol","Food","Industrial","Export"]},
+        "SOYBEAN":{"supply":395,"demand":390,"unit":"Mt","producers":["Brazil","USA","Argentina","China","India"],"drivers":["Crushing","Animal Feed","Food Oil","Biodiesel","Export"]},
+    }
+    MACRO = {
+        "US_CPI":{"name":"US CPI YoY","value":3.1,"prev":3.4,"unit":"%"},
+        "US_CORE_CPI":{"name":"US Core CPI YoY","value":3.9,"prev":4.0,"unit":"%"},
+        "FED_RATE":{"name":"Fed Funds Rate","value":5.33,"prev":5.33,"unit":"%"},
+        "US_GDP":{"name":"US GDP Growth QoQ","value":3.3,"prev":4.9,"unit":"%"},
+        "US_UNEMPLOYMENT":{"name":"Unemployment Rate","value":3.7,"prev":3.7,"unit":"%"},
+        "US_PMI":{"name":"Manufacturing PMI","value":49.1,"prev":47.4,"unit":""},
+        "EU_CPI":{"name":"EU CPI YoY","value":2.8,"prev":2.9,"unit":"%"},
+        "ECB_RATE":{"name":"ECB Main Rate","value":4.50,"prev":4.50,"unit":"%"},
+        "BOE_RATE":{"name":"BOE Bank Rate","value":5.25,"prev":5.25,"unit":"%"},
+        "CN_GDP":{"name":"China GDP YoY","value":5.2,"prev":4.9,"unit":"%"},
+        "VIX":{"name":"CBOE VIX","value":13.82,"prev":14.15,"unit":""},
+        "MOVE":{"name":"MOVE Bond Vol","value":98.5,"prev":102.3,"unit":""},
+        "BREAKEVEN":{"name":"10Y Breakeven","value":2.36,"prev":2.40,"unit":"%"},
+    }
+
+    def __init__(self):
+        self.prices = {}
+        self.history = {}
+        random.seed(42)
+        self._init()
+
+    def _init(self):
+        for tk, info in self.ASSETS.items():
+            base = info["price"]; vol = info["vol"]; dv = vol/math.sqrt(252)
+            p = base * 0.85; hist = []
+            for i in range(252):
+                drift = 0.0002 + random.gauss(0, dv)
+                p *= (1 + drift)
+                dt = datetime.now() - timedelta(days=252-i)
+                o = p*(1+random.gauss(0,dv*0.3))
+                h = max(o,p)*(1+abs(random.gauss(0,dv*0.5)))
+                l = min(o,p)*(1-abs(random.gauss(0,dv*0.5)))
+                hist.append({"date":dt.strftime("%Y-%m-%d"),"open":round(o,4),"high":round(h,4),"low":round(l,4),"close":round(p,4),"volume":int(random.uniform(5e6,50e6))})
+            self.prices[tk] = round(p,4)
+            self.history[tk] = hist
+
+    def tick(self):
+        mf = random.gauss(0,0.001); rf = random.gauss(0,0.0005)
+        updates = {}
+        for tk, info in self.ASSETS.items():
+            dv = info["vol"]/math.sqrt(252)/math.sqrt(78)
+            idio = random.gauss(0, dv)
+            t = info["type"]
+            if t in ("equity","etf","index"): ch = mf*0.6+rf*0.2+idio*0.5
+            elif t == "commodity": ch = mf*0.2-rf*0.3+idio*0.7
+            elif t == "bond": ch = -mf*0.3+idio*0.3
+            else: ch = mf*0.1+idio*0.4
+            old = self.prices[tk]; new = round(old*(1+ch),4)
+            self.prices[tk] = new
+            updates[tk] = {"ticker":tk,"price":new,"change":round(new-old,4),"changePct":round((new-old)/old*100,4),"name":info["name"],"type":info["type"]}
+        return updates
+
+# ── Quant Engine ────────────────────────────────────────────
+class QuantEngine:
+    @staticmethod
+    def returns(prices):
+        return [math.log(prices[i]/prices[i-1]) for i in range(1,len(prices)) if prices[i-1]>0]
+
+    @staticmethod
+    def ma(prices, w):
+        r = []
+        for i in range(len(prices)):
+            if i < w-1: r.append(None)
+            else: r.append(sum(prices[i-w+1:i+1])/w)
+        return r
+
+    @staticmethod
+    def ema(prices, w):
+        if not prices: return []
+        k=2/(w+1); r=[prices[0]]
+        for i in range(1,len(prices)): r.append(prices[i]*k+r[-1]*(1-k))
+        return r
+
+    @staticmethod
+    def rsi(prices, period=14):
+        if len(prices)<period+1: return [50]*len(prices)
+        d=[prices[i]-prices[i-1] for i in range(1,len(prices))]
+        g=[max(x,0) for x in d]; l=[-min(x,0) for x in d]
+        ag=sum(g[:period])/period; al=sum(l[:period])/period
+        r=[None]*period
+        for i in range(period,len(d)):
+            ag=(ag*(period-1)+g[i])/period; al=(al*(period-1)+l[i])/period
+            r.append(100-(100/(1+ag/al)) if al else 100)
+        return r
+
+    @staticmethod
+    def macd(prices):
+        ef=QuantEngine.ema(prices,12); es=QuantEngine.ema(prices,26)
+        ml=[f-s for f,s in zip(ef,es)]; sl=QuantEngine.ema(ml,9)
+        return ml,sl,[m-s for m,s in zip(ml,sl)]
+
+    @staticmethod
+    def bollinger(prices, w=20, ns=2):
+        u,m,lo=[],[],[]
+        for i in range(len(prices)):
+            if i<w-1: u.append(None);m.append(None);lo.append(None)
+            else:
+                s=prices[i-w+1:i+1]; mn=sum(s)/w
+                std=statistics.stdev(s) if len(s)>1 else 0
+                m.append(mn);u.append(mn+ns*std);lo.append(mn-ns*std)
+        return u,m,lo
+
+    @staticmethod
+    def monte_carlo(price, vol, days=252, sims=500):
+        dv=vol/math.sqrt(252); paths=[]; finals=[]
+        for _ in range(sims):
+            path=[price]; p=price
+            for _ in range(days):
+                p=p*math.exp(-0.5*dv**2+dv*random.gauss(0,1))
+                path.append(round(p,4))
+            paths.append(path); finals.append(p)
+        finals.sort(); n=len(finals)
+        return {"paths":[p for p in paths[:50]],"percentiles":{"p5":round(finals[int(n*.05)],2),"p25":round(finals[int(n*.25)],2),"p50":round(finals[int(n*.5)],2),"p75":round(finals[int(n*.75)],2),"p95":round(finals[int(n*.95)],2)},"mean":round(statistics.mean(finals),2),"std":round(statistics.stdev(finals),2),"current":price,"days":days}
+
+    @staticmethod
+    def risk_metrics(prices):
+        rets=QuantEngine.returns(prices)
+        if len(rets)<10: return {}
+        ar=sum(rets)/len(rets)*252; av=statistics.stdev(rets)*math.sqrt(252)
+        sharpe=(ar-0.05)/av if av else 0
+        down=[r for r in rets if r<0]
+        dv=statistics.stdev(down)*math.sqrt(252) if len(down)>1 else av
+        sortino=(ar-0.05)/dv if dv else 0
+        cum=[1]
+        for r in rets: cum.append(cum[-1]*math.exp(r))
+        pk=cum[0]; mdd=0
+        for v in cum:
+            if v>pk: pk=v
+            dd=(pk-v)/pk
+            if dd>mdd: mdd=dd
+        sr=sorted(rets); var95=-sr[int(len(sr)*0.05)]*math.sqrt(252)
+        tail=sr[:int(len(sr)*0.05)]
+        cvar=-statistics.mean(tail)*math.sqrt(252) if tail else var95
+        return {"annualReturn":round(ar*100,2),"annualVol":round(av*100,2),"sharpe":round(sharpe,3),"sortino":round(sortino,3),"maxDrawdown":round(mdd*100,2),"var95":round(var95*100,2),"cvar95":round(cvar*100,2)}
+
+    @staticmethod
+    def correlation(price_dict):
+        tks=list(price_dict.keys()); rd={}; ml=float('inf')
+        for t in tks:
+            r=QuantEngine.returns(price_dict[t]); rd[t]=r; ml=min(ml,len(r))
+        for t in tks: rd[t]=rd[t][-ml:]
+        mat=[]
+        for t1 in tks:
+            row=[]
+            for t2 in tks:
+                if t1==t2: row.append(1.0)
+                else:
+                    r1,r2=rd[t1],rd[t2]
+                    m1,m2=statistics.mean(r1),statistics.mean(r2)
+                    s1,s2=statistics.stdev(r1),statistics.stdev(r2)
+                    if s1>0 and s2>0:
+                        cov=sum((a-m1)*(b-m2) for a,b in zip(r1,r2))/(len(r1)-1)
+                        row.append(round(max(-1,min(1,cov/(s1*s2))),3))
+                    else: row.append(0)
+            mat.append(row)
+        return {"tickers":tks,"matrix":mat}
+
+    @staticmethod
+    def fair_value_equity(info, price):
+        eps=info.get("eps",0); fcf=info.get("fcf",0)
+        pf=max(fcf,eps*0.7) if fcf else eps*0.7
+        dcf=0
+        for y in range(1,11):
+            pf*=1.08; dcf+=pf/(1.10**y)
+        term=pf*1.025/(0.10-0.025); dcf+=term/(1.10**10)
+        shares=info.get("mcap",100)*1e9/price if price>0 else 1e9
+        dcf_ps=dcf*1e9/shares
+        spe={"Technology":30,"Financial":14,"Healthcare":22,"Energy":12,"Consumer Cyclical":25,"Industrials":20}
+        pe_val=abs(eps)*spe.get(info.get("sector",""),20) if eps>0 else price
+        fv=dcf_ps*0.5+pe_val*0.5; dev=((price-fv)/fv)*100
+        return {"currentPrice":price,"fairValue":round(fv,2),"dcfValue":round(dcf_ps,2),"peValue":round(pe_val,2),"deviation":round(dev,2),"signal":"OVERVALUED" if dev>10 else "UNDERVALUED" if dev<-10 else "FAIR VALUE"}
+
+    @staticmethod
+    def fair_value_commodity(tk, price, vol):
+        random.seed(hash(tk)%1000)
+        hm=price*random.uniform(0.88,1.12)
+        sd=MarketDataEngine.COMMODITY_SD.get(tk,{})
+        s=sd.get("supply",100); d=sd.get("demand",100)
+        prem=(d-s)/s*0.1 if s else 0
+        fv=hm*(1+prem); dev=((price-fv)/fv)*100
+        return {"currentPrice":price,"fairValue":round(fv,4),"deviation":round(dev,2),"signal":"OVERVALUED" if dev>10 else "UNDERVALUED" if dev<-10 else "FAIR VALUE"}
+
+    @staticmethod
+    def backtest(prices, fast=20, slow=50):
+        if len(prices)<slow+1: return {"error":"Insufficient data"}
+        sf=QuantEngine.ma(prices,fast); ss=QuantEngine.ma(prices,slow)
+        pos=0; ep=0; trades=[]; eq=[100]; ce=100
+        for i in range(slow,len(prices)):
+            if sf[i] is None or ss[i] is None: eq.append(ce); continue
+            if sf[i]>ss[i] and pos==0: pos=1; ep=prices[i]; trades.append({"type":"BUY","price":round(prices[i],4),"day":i})
+            elif sf[i]<ss[i] and pos==1:
+                ret=(prices[i]-ep)/ep; ce*=(1+ret); pos=0
+                trades.append({"type":"SELL","price":round(prices[i],4),"day":i,"return":round(ret*100,2)})
+            eq.append(round(ce,2))
+        if pos==1:
+            ret=(prices[-1]-ep)/ep; ce*=(1+ret)
+            trades.append({"type":"SELL","price":round(prices[-1],4),"day":len(prices)-1,"return":round(ret*100,2)})
+        tr=(ce-100); bh=(prices[-1]-prices[slow])/prices[slow]*100
+        wins=[t for t in trades if t.get("return",0)>0]; losses=[t for t in trades if t.get("return",0)<0]
+        return {"totalReturn":round(tr,2),"buyHoldReturn":round(bh,2),"numTrades":len([t for t in trades if t["type"]=="SELL"]),
+                "winRate":round(len(wins)/(len(wins)+len(losses))*100,1) if (wins or losses) else 0,
+                "equity":eq[-100:],"trades":trades[-20:]}
+
+    @staticmethod
+    def garch(prices):
+        rets=QuantEngine.returns(prices)
+        if len(rets)<10: return {"currentVol":0,"forecast":[]}
+        omega=0.00001; alpha=0.1; beta=0.85
+        var=statistics.variance(rets); vs=[var]
+        for i in range(1,len(rets)):
+            var=omega+alpha*rets[i-1]**2+beta*var; vs.append(var)
+        fc=[]; v=vs[-1]
+        for _ in range(30):
+            v=omega+(alpha+beta)*v; fc.append(round(math.sqrt(v)*math.sqrt(252)*100,2))
+        return {"currentVol":round(math.sqrt(vs[-1])*math.sqrt(252)*100,2),"historicalVols":[round(math.sqrt(x)*math.sqrt(252)*100,2) for x in vs[-60:]],"forecast":fc}
+
+# ── HTTP Handler ────────────────────────────────────────────
+ME = MarketDataEngine()
+QE = QuantEngine()
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed=urlparse(self.path); path=parsed.path; params=parse_qs(parsed.query)
+        if path.startswith("/api/"):
+            self._json(self._api(path,params)); return
+        if path in ("/",""):  path="/index.html"
+        fp=f"/home/user/quant-platform/frontend{path}"
+        try:
+            with open(fp,"rb") as f: content=f.read()
+            ct={"css":"text/css","js":"application/javascript","json":"application/json","svg":"image/svg+xml"}.get(path.rsplit(".",1)[-1],"text/html")
+            self.send_response(200); self.send_header("Content-Type",ct); self.end_headers(); self.wfile.write(content)
+        except: self.send_response(404); self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        for h,v in [("Access-Control-Allow-Origin","*"),("Access-Control-Allow-Methods","GET,POST,OPTIONS"),("Access-Control-Allow-Headers","Content-Type")]:
+            self.send_header(h,v)
+        self.end_headers()
+
+    def _json(self, data):
+        self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def _api(self, path, P):
+        def g(k,d=""): return P.get(k,[d])[0]
+        try:
+            if path=="/api/market/overview":
+                r={}
+                for tk,info in ME.ASSETS.items():
+                    p=ME.prices[tk]; h=ME.history[tk]; prev=h[-2]["close"] if len(h)>1 else p
+                    ch=p-prev; pct=(ch/prev*100) if prev else 0
+                    r[tk]={"ticker":tk,"name":info["name"],"price":p,"change":round(ch,4),"changePct":round(pct,4),"type":info["type"],"sector":info["sector"],"exchange":info.get("exchange",""),"vol":info["vol"]}
+                return r
+            if path=="/api/market/tick": return ME.tick()
+            if path=="/api/asset/detail":
+                tk=g("ticker","SPX").upper(); info=ME.ASSETS.get(tk)
+                if not info: return {"error":f"Unknown: {tk}"}
+                p=ME.prices[tk]; h=ME.history[tk]; cl=[x["close"] for x in h]
+                r={"ticker":tk,"name":info["name"],"price":p,"type":info["type"],"sector":info["sector"],"exchange":info.get("exchange",""),"high52w":round(max(cl),4),"low52w":round(min(cl),4),"avgVolume":int(statistics.mean([x["volume"] for x in h])),"volatility":round(info["vol"]*100,1)}
+                for k in ["mcap","pe","eps","revenue","net_income","margin","fcf","debt"]:
+                    if k in info: r[k]=info[k]
+                return r
+            if path=="/api/asset/history":
+                tk=g("ticker","SPX").upper()
+                return {"ticker":tk,"history":ME.history.get(tk,[])}
+            if path=="/api/asset/technicals":
+                tk=g("ticker","SPX").upper(); h=ME.history.get(tk,[])
+                cl=[x["close"] for x in h]; ml,sl,mh=QE.macd(cl); bu,bm,bl=QE.bollinger(cl)
+                return {"dates":[x["date"] for x in h],"closes":cl,"sma20":QE.ma(cl,20),"sma50":QE.ma(cl,50),"rsi":QE.rsi(cl),"macd":ml,"macdSignal":sl,"macdHist":mh,"bbUpper":bu,"bbMid":bm,"bbLower":bl}
+            if path=="/api/asset/risk":
+                tk=g("ticker","SPX").upper(); h=ME.history.get(tk,[])
+                return QE.risk_metrics([x["close"] for x in h])
+            if path=="/api/asset/montecarlo":
+                tk=g("ticker","SPX").upper(); info=ME.ASSETS.get(tk)
+                if not info: return {"error":"Unknown"}
+                return QE.monte_carlo(ME.prices[tk],info["vol"],int(g("days","252")),min(int(g("sims","500")),1000))
+            if path=="/api/asset/fairvalue":
+                tk=g("ticker","SPX").upper(); info=ME.ASSETS.get(tk)
+                if not info: return {"error":"Unknown"}
+                p=ME.prices[tk]
+                if info["type"]=="equity": return QE.fair_value_equity(info,p)
+                if info["type"]=="commodity": return QE.fair_value_commodity(tk,p,info["vol"])
+                return {"error":"N/A for this type"}
+            if path=="/api/asset/competitors":
+                tk=g("ticker","NVDA").upper(); comps=ME.COMPETITORS.get(tk,[])
+                return {"ticker":tk,"competitors":[{"ticker":c,"name":ME.ASSETS[c]["name"],"price":ME.prices[c],"mcap":ME.ASSETS[c].get("mcap",0),"pe":ME.ASSETS[c].get("pe",0),"margin":ME.ASSETS[c].get("margin",0),"revenue":ME.ASSETS[c].get("revenue",0)} for c in comps if c in ME.ASSETS]}
+            if path=="/api/commodity/supplydemand":
+                tk=g("ticker","COPPER").upper(); sd=ME.COMMODITY_SD.get(tk)
+                return {"ticker":tk,**(sd or {})} if sd else {"error":"No data"}
+            if path=="/api/macro/data": return ME.MACRO
+            if path=="/api/correlation":
+                tks=[t.strip().upper() for t in g("tickers","COPPER,GOLD,OIL,SPX,US10Y,DXY").split(",")]
+                pd={t:[x["close"] for x in ME.history[t]] for t in tks if t in ME.history}
+                return QE.correlation(pd) if len(pd)>=2 else {"error":"Need 2+ tickers"}
+            if path=="/api/asset/garch":
+                tk=g("ticker","SPX").upper()
+                return QE.garch([x["close"] for x in ME.history.get(tk,[])])
+            if path=="/api/backtest":
+                tk=g("ticker","SPX").upper()
+                return QE.backtest([x["close"] for x in ME.history.get(tk,[])],int(g("fast","20")),int(g("slow","50")))
+            if path=="/api/search":
+                q=g("q","").upper()
+                return {"results":[{"ticker":t,"name":i["name"],"type":i["type"],"sector":i["sector"]} for t,i in ME.ASSETS.items() if q in t or q in i["name"].upper()][:10]}
+            if path=="/api/portfolio/analyze":
+                tks=[t.strip().upper() for t in g("tickers","AAPL,MSFT,GOLD").split(",")]
+                ws=[float(w) for w in g("weights","0.33,0.33,0.34").split(",")]
+                pos=[]; ars=[]
+                for i,t in enumerate(tks):
+                    h=ME.history.get(t);
+                    if not h: continue
+                    rets=QE.returns([x["close"] for x in h])
+                    if not rets: continue
+                    ar_=statistics.mean(rets)*252
+                    pos.append({"ticker":t,"name":ME.ASSETS.get(t,{}).get("name",t),"weight":ws[i],"price":ME.prices.get(t,0),"annReturn":round(ar_*100,2),"vol":round(statistics.stdev(rets)*math.sqrt(252)*100,2)})
+                    ars.append((ws[i],rets))
+                if ars:
+                    ml=min(len(r[1]) for r in ars)
+                    pd=[sum(w*r[d] for w,r in ars) for d in range(ml)]
+                    pv=statistics.stdev(pd)*math.sqrt(252) if len(pd)>1 else 0
+                    pr=sum(w*statistics.mean(r)*252 for w,r in ars)
+                    sh=(pr-0.05)/pv if pv else 0
+                else: pv=0;pr=0;sh=0
+                return {"positions":pos,"portfolioReturn":round(pr*100,2),"portfolioVol":round(pv*100,2),"sharpe":round(sh,3)}
+            if path=="/api/assets":
+                at=P.get("type",[None])[0]
+                r=[]
+                for tk,info in ME.ASSETS.items():
+                    if at and info["type"]!=at: continue
+                    p=ME.prices[tk]; h=ME.history[tk]; prev=h[-2]["close"] if len(h)>1 else p
+                    r.append({"ticker":tk,"name":info["name"],"price":p,"change":round(p-prev,4),"changePct":round((p-prev)/prev*100,4) if prev else 0,"type":info["type"],"sector":info["sector"],"exchange":info.get("exchange","")})
+                return {"assets":r}
+        except Exception as e:
+            return {"error":str(e)}
+        return {"error":"Unknown endpoint"}
+
+    def log_message(self, *a): pass
+
+def run():
+    threading.Thread(target=lambda:[time.sleep(3) or ME.tick() for _ in iter(int,1)],daemon=True).start()
+    with socketserver.TCPServer(("",8888),Handler) as s:
+        s.allow_reuse_address=True; print("Server: http://localhost:8888"); s.serve_forever()
+
+if __name__=="__main__": run()

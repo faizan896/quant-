@@ -1,0 +1,505 @@
+/* ══════════════════════════════════════════════════════════
+   QuantOS Charts - Canvas-based financial charting engine
+   ══════════════════════════════════════════════════════════ */
+
+const Charts = {
+  colors: {
+    bg: '#141926', grid: '#1e2a3a', gridLight: '#253045',
+    text: '#5a6478', textLight: '#8892a4',
+    green: '#10b981', red: '#ef4444', blue: '#3b82f6',
+    purple: '#8b5cf6', cyan: '#06b6d4', yellow: '#f59e0b',
+    white: '#e8edf5', orange: '#f97316',
+  },
+
+  // Utility: setup canvas with DPR
+  setup(canvas, w, h) {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    return ctx;
+  },
+
+  // ── Candlestick Chart ──
+  candlestick(canvas, data, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 800;
+    const H = opts.height || 350;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 20, r: 70, b: 30, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    // Data
+    const ohlc = data.slice(-120); // Last 120 candles
+    if (!ohlc.length) return;
+    let hi = -Infinity, lo = Infinity;
+    ohlc.forEach(d => { hi = Math.max(hi, d.high); lo = Math.min(lo, d.low); });
+    const range = hi - lo || 1;
+    const barW = Math.max(2, (cw / ohlc.length) * 0.7);
+    const gap = cw / ohlc.length;
+
+    const yScale = v => pad.t + ch - ((v - lo) / range * ch);
+    const xScale = i => pad.l + i * gap + gap / 2;
+
+    // Background
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    // Grid lines
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 0.5;
+    const gridLines = 6;
+    for (let i = 0; i <= gridLines; i++) {
+      const y = pad.t + (ch / gridLines) * i;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+      const val = hi - (range / gridLines) * i;
+      ctx.fillStyle = this.colors.text;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(this._fmt(val), W - pad.r + 8, y + 4);
+    }
+
+    // Overlays: SMA lines
+    if (opts.sma20) this._drawLine(ctx, opts.sma20.slice(-120), ohlc, xScale, yScale, this.colors.blue, 1);
+    if (opts.sma50) this._drawLine(ctx, opts.sma50.slice(-120), ohlc, xScale, yScale, this.colors.yellow, 1);
+    if (opts.bbUpper) {
+      this._drawLine(ctx, opts.bbUpper.slice(-120), ohlc, xScale, yScale, this.colors.purple, 0.7);
+      this._drawLine(ctx, opts.bbLower.slice(-120), ohlc, xScale, yScale, this.colors.purple, 0.7);
+    }
+
+    // Candles
+    ohlc.forEach((d, i) => {
+      const x = xScale(i);
+      const bullish = d.close >= d.open;
+      const color = bullish ? this.colors.green : this.colors.red;
+      // Wick
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, yScale(d.high)); ctx.lineTo(x, yScale(d.low)); ctx.stroke();
+      // Body
+      const top = yScale(Math.max(d.open, d.close));
+      const bot = yScale(Math.min(d.open, d.close));
+      const bodyH = Math.max(1, bot - top);
+      ctx.fillStyle = color;
+      ctx.fillRect(x - barW / 2, top, barW, bodyH);
+    });
+
+    // Volume bars at bottom
+    const maxVol = Math.max(...ohlc.map(d => d.volume || 0));
+    if (maxVol > 0) {
+      const volH = ch * 0.15;
+      ohlc.forEach((d, i) => {
+        const x = xScale(i);
+        const h = (d.volume / maxVol) * volH;
+        const bullish = d.close >= d.open;
+        ctx.fillStyle = bullish ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)';
+        ctx.fillRect(x - barW / 2, pad.t + ch - h, barW, h);
+      });
+    }
+
+    // Date labels
+    ctx.fillStyle = this.colors.text; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+    const step = Math.max(1, Math.floor(ohlc.length / 8));
+    for (let i = 0; i < ohlc.length; i += step) {
+      const d = ohlc[i].date || '';
+      ctx.fillText(d.slice(5), xScale(i), H - 8);
+    }
+
+    // Current price line
+    const last = ohlc[ohlc.length - 1];
+    const py = yScale(last.close);
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = last.close >= ohlc[0].open ? this.colors.green : this.colors.red;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(W - pad.r, py); ctx.stroke();
+    ctx.setLineDash([]);
+    // Price label
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fillRect(W - pad.r, py - 9, 65, 18);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(this._fmt(last.close), W - pad.r + 5, py + 4);
+  },
+
+  // ── Line Chart ──
+  lineChart(canvas, datasets, labels, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 800;
+    const H = opts.height || 250;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 20, r: 60, b: 30, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    // Find range across all datasets
+    let hi = -Infinity, lo = Infinity;
+    datasets.forEach(ds => {
+      ds.data.forEach(v => { if (v !== null && v !== undefined) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
+    });
+    const range = hi - lo || 1;
+    const yScale = v => pad.t + ch - ((v - lo) / range * ch);
+
+    // Grid
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 5; i++) {
+      const y = pad.t + (ch / 5) * i;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+      ctx.fillStyle = this.colors.text; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(this._fmt(hi - (range / 5) * i), W - pad.r + 6, y + 4);
+    }
+
+    // Lines
+    const n = datasets[0]?.data.length || 0;
+    datasets.forEach(ds => {
+      ctx.strokeStyle = ds.color || this.colors.blue;
+      ctx.lineWidth = ds.width || 1.5;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < ds.data.length; i++) {
+        if (ds.data[i] === null || ds.data[i] === undefined) continue;
+        const x = pad.l + (i / (n - 1)) * cw;
+        const y = yScale(ds.data[i]);
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Fill area
+      if (ds.fill) {
+        ctx.lineTo(pad.l + ((ds.data.length - 1) / (n - 1)) * cw, pad.t + ch);
+        ctx.lineTo(pad.l, pad.t + ch);
+        ctx.closePath();
+        ctx.fillStyle = ds.fillColor || 'rgba(59,130,246,0.05)';
+        ctx.fill();
+      }
+    });
+
+    // Labels
+    if (labels) {
+      ctx.fillStyle = this.colors.text; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      const step = Math.max(1, Math.floor(labels.length / 8));
+      for (let i = 0; i < labels.length; i += step) {
+        const x = pad.l + (i / (labels.length - 1)) * cw;
+        ctx.fillText((labels[i] || '').slice(5), x, H - 8);
+      }
+    }
+
+    // Legend
+    if (opts.legend) {
+      let lx = pad.l + 4;
+      datasets.forEach(ds => {
+        if (!ds.label) return;
+        ctx.fillStyle = ds.color || this.colors.blue;
+        ctx.fillRect(lx, 6, 12, 3);
+        ctx.fillStyle = this.colors.textLight; ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(ds.label, lx + 16, 10);
+        lx += ctx.measureText(ds.label).width + 30;
+      });
+    }
+  },
+
+  // ── Bar Chart ──
+  barChart(canvas, data, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 400;
+    const H = opts.height || 200;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 20, r: 10, b: 40, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    const maxVal = Math.max(...data.map(d => Math.abs(d.value)));
+    const barW = Math.min(40, (cw / data.length) * 0.7);
+    const gap = cw / data.length;
+
+    data.forEach((d, i) => {
+      const x = pad.l + i * gap + (gap - barW) / 2;
+      const h = (Math.abs(d.value) / maxVal) * ch;
+      const y = pad.t + ch - h;
+      ctx.fillStyle = d.color || (d.value >= 0 ? this.colors.green : this.colors.red);
+      ctx.fillRect(x, y, barW, h);
+      // Label
+      ctx.fillStyle = this.colors.text; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      ctx.save(); ctx.translate(x + barW / 2, H - 6); ctx.rotate(-0.4);
+      ctx.fillText(d.label || '', 0, 0); ctx.restore();
+      // Value
+      ctx.fillStyle = this.colors.textLight; ctx.font = '10px monospace';
+      ctx.fillText(d.value.toFixed(1), x + barW / 2, y - 5);
+    });
+  },
+
+  // ── Heatmap ──
+  heatmap(canvas, matrix, labels, opts = {}) {
+    const n = labels.length;
+    const cellSize = opts.cellSize || Math.min(50, Math.floor((opts.width || 500) / (n + 1)));
+    const W = cellSize * (n + 1) + 10;
+    const H = cellSize * (n + 1) + 10;
+    const ctx = this.setup(canvas, W, H);
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    // Labels
+    ctx.fillStyle = this.colors.textLight; ctx.font = `bold ${Math.min(11, cellSize * 0.3)}px monospace`;
+    ctx.textAlign = 'center';
+    for (let i = 0; i < n; i++) {
+      ctx.fillText(labels[i], (i + 1.5) * cellSize + 5, cellSize * 0.65);
+      ctx.fillText(labels[i], cellSize * 0.55, (i + 1.5) * cellSize + 5 + 4);
+    }
+
+    // Cells
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const v = matrix[i][j];
+        const x = (j + 1) * cellSize + 5;
+        const y = (i + 1) * cellSize + 5;
+        ctx.fillStyle = this._corrColor(v);
+        ctx.fillRect(x + 1, y + 1, cellSize - 2, cellSize - 2);
+        ctx.fillStyle = Math.abs(v) > 0.5 ? '#fff' : this.colors.textLight;
+        ctx.font = `bold ${Math.min(11, cellSize * 0.28)}px monospace`;
+        ctx.fillText(v.toFixed(2), x + cellSize / 2, y + cellSize / 2 + 4);
+      }
+    }
+  },
+
+  // ── Monte Carlo ──
+  monteCarlo(canvas, data, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 800;
+    const H = opts.height || 350;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 20, r: 70, b: 30, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    const paths = data.paths;
+    if (!paths || !paths.length) return;
+    const days = paths[0].length;
+
+    // Find range
+    let hi = -Infinity, lo = Infinity;
+    paths.forEach(p => p.forEach(v => { hi = Math.max(hi, v); lo = Math.min(lo, v); }));
+    const range = hi - lo || 1;
+    const yScale = v => pad.t + ch - ((v - lo) / range * ch);
+    const xScale = i => pad.l + (i / (days - 1)) * cw;
+
+    // Grid
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 5; i++) {
+      const y = pad.t + (ch / 5) * i;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+      ctx.fillStyle = this.colors.text; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(this._fmt(hi - (range / 5) * i), W - pad.r + 6, y + 4);
+    }
+
+    // Draw paths
+    paths.forEach((path, idx) => {
+      const finalPrice = path[path.length - 1];
+      const startPrice = path[0];
+      ctx.strokeStyle = finalPrice >= startPrice
+        ? `rgba(16, 185, 129, ${0.08 + idx * 0.002})`
+        : `rgba(239, 68, 68, ${0.08 + idx * 0.002})`;
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      path.forEach((v, i) => {
+        const x = xScale(i), y = yScale(v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    // Percentile lines
+    const pcts = data.percentiles;
+    if (pcts) {
+      const labels = [
+        { val: pcts.p5, label: 'P5', color: this.colors.red },
+        { val: pcts.p25, label: 'P25', color: this.colors.yellow },
+        { val: pcts.p50, label: 'P50', color: this.colors.blue },
+        { val: pcts.p75, label: 'P75', color: this.colors.yellow },
+        { val: pcts.p95, label: 'P95', color: this.colors.green },
+      ];
+      labels.forEach(p => {
+        const y = yScale(p.val);
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = p.color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(W - pad.r - 20, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = p.color; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(`${p.label}: ${this._fmt(p.val)}`, W - pad.r + 4, y + 3);
+      });
+    }
+
+    // Start price line
+    const startY = yScale(data.current);
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = this.colors.white; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, startY); ctx.lineTo(W - pad.r, startY); ctx.stroke();
+    ctx.setLineDash([]);
+  },
+
+  // ── RSI Chart ──
+  rsiChart(canvas, rsiData, dates, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 800;
+    const H = opts.height || 120;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 10, r: 70, b: 20, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    const data = rsiData.slice(-120);
+    const n = data.length;
+
+    // Overbought/Oversold zones
+    const y70 = pad.t + ch * (1 - 70 / 100);
+    const y30 = pad.t + ch * (1 - 30 / 100);
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.05)';
+    ctx.fillRect(pad.l, pad.t, cw, y70 - pad.t);
+    ctx.fillStyle = 'rgba(16, 185, 129, 0.05)';
+    ctx.fillRect(pad.l, y30, cw, pad.t + ch - y30);
+
+    // Lines at 70, 50, 30
+    [70, 50, 30].forEach(v => {
+      const y = pad.t + ch * (1 - v / 100);
+      ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 0.5;
+      ctx.setLineDash(v === 50 ? [] : [3, 3]);
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = this.colors.text; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(v, W - pad.r + 6, y + 3);
+    });
+
+    // RSI line
+    ctx.strokeStyle = this.colors.purple; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    data.forEach((v, i) => {
+      if (v === null || v === undefined) return;
+      const x = pad.l + (i / (n - 1)) * cw;
+      const y = pad.t + ch * (1 - v / 100);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  },
+
+  // ── MACD Chart ──
+  macdChart(canvas, macdLine, signalLine, histogram, opts = {}) {
+    const W = opts.width || canvas.parentElement.clientWidth || 800;
+    const H = opts.height || 120;
+    const ctx = this.setup(canvas, W, H);
+    const pad = { t: 10, r: 70, b: 20, l: 10 };
+    const cw = W - pad.l - pad.r;
+    const ch = H - pad.t - pad.b;
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    const ml = macdLine.slice(-120);
+    const sl = signalLine.slice(-120);
+    const hist = histogram.slice(-120);
+    const n = ml.length;
+
+    let hi = -Infinity, lo = Infinity;
+    [...ml, ...sl, ...hist].forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
+    const range = hi - lo || 1;
+    const yScale = v => pad.t + ch - ((v - lo) / range * ch);
+    const zero = yScale(0);
+
+    // Zero line
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, zero); ctx.lineTo(W - pad.r, zero); ctx.stroke();
+
+    // Histogram
+    const barW = Math.max(1, cw / n * 0.6);
+    hist.forEach((v, i) => {
+      if (v == null) return;
+      const x = pad.l + (i / (n - 1)) * cw;
+      const y = yScale(v);
+      ctx.fillStyle = v >= 0 ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)';
+      ctx.fillRect(x - barW / 2, Math.min(y, zero), barW, Math.abs(y - zero));
+    });
+
+    // MACD & Signal lines
+    [{ data: ml, color: this.colors.blue }, { data: sl, color: this.colors.orange }].forEach(({ data, color }) => {
+      ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      let s = false;
+      data.forEach((v, i) => {
+        if (v == null) return;
+        const x = pad.l + (i / (n - 1)) * cw;
+        const y = yScale(v);
+        if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+  },
+
+  // ── Gauge Chart ──
+  gauge(canvas, value, min, max, opts = {}) {
+    const W = opts.width || 200;
+    const H = opts.height || 120;
+    const ctx = this.setup(canvas, W, H);
+
+    ctx.fillStyle = this.colors.bg; ctx.fillRect(0, 0, W, H);
+
+    const cx = W / 2, cy = H - 15;
+    const r = Math.min(cx - 10, cy - 10);
+    const startAngle = Math.PI;
+    const endAngle = 2 * Math.PI;
+
+    // Background arc
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startAngle, endAngle);
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 10;
+    ctx.stroke();
+
+    // Value arc
+    const pct = Math.max(0, Math.min(1, (value - min) / (max - min)));
+    const valAngle = startAngle + pct * Math.PI;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startAngle, valAngle);
+    const color = pct < 0.4 ? this.colors.green : pct < 0.6 ? this.colors.yellow : this.colors.red;
+    ctx.strokeStyle = color; ctx.lineWidth = 10;
+    ctx.stroke();
+
+    // Value text
+    ctx.fillStyle = this.colors.white; ctx.font = 'bold 18px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(this._fmt(value), cx, cy - 15);
+
+    if (opts.label) {
+      ctx.fillStyle = this.colors.text; ctx.font = '10px sans-serif';
+      ctx.fillText(opts.label, cx, cy + 2);
+    }
+  },
+
+  // Helpers
+  _drawLine(ctx, data, ohlc, xScale, yScale, color, width) {
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.beginPath();
+    let started = false;
+    data.forEach((v, i) => {
+      if (v === null || v === undefined) return;
+      const x = xScale(i), y = yScale(v);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  },
+
+  _fmt(v) {
+    if (v === null || v === undefined) return '';
+    if (Math.abs(v) >= 10000) return v.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    if (Math.abs(v) >= 100) return v.toFixed(2);
+    if (Math.abs(v) >= 1) return v.toFixed(2);
+    return v.toFixed(4);
+  },
+
+  _corrColor(v) {
+    if (v >= 0.7) return 'rgba(16,185,129,0.7)';
+    if (v >= 0.3) return 'rgba(16,185,129,0.3)';
+    if (v > -0.3) return 'rgba(59,130,246,0.15)';
+    if (v > -0.7) return 'rgba(239,68,68,0.3)';
+    return 'rgba(239,68,68,0.7)';
+  },
+};

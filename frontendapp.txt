@@ -1,0 +1,379 @@
+/* ══════════════════════════════════════════════════════════
+   QuantOS - Main Application
+   ══════════════════════════════════════════════════════════ */
+
+const API = '/api';
+const app = {
+  currentPage: 'dashboard',
+  marketData: {},
+  watchlist: JSON.parse(localStorage.getItem('qos_watchlist') || '["AAPL","NVDA","GOLD","OIL","SPX","COPPER"]'),
+  portfolio: JSON.parse(localStorage.getItem('qos_portfolio') || '[{"t":"AAPL","w":0.25},{"t":"MSFT","w":0.20},{"t":"GOLD","w":0.20},{"t":"OIL","w":0.15},{"t":"SPX","w":0.20}]'),
+  tickInterval: null,
+};
+
+// ── API Client ──
+async function api(path) {
+  const r = await fetch(API + path);
+  return r.json();
+}
+
+// ── Formatters ──
+function fmt(v, d = 2) {
+  if (v == null) return '—';
+  if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (Math.abs(v) >= 1e4) return v.toFixed(d).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return v.toFixed(d);
+}
+function fmtPct(v) { return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%'; }
+function cls(v) { return v >= 0 ? 'positive' : 'negative'; }
+function arrow(v) { return v >= 0 ? '&#9650;' : '&#9660;'; }
+
+// ── Clock ──
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' +
+    now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ── Navigation ──
+function navigate(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const el = document.getElementById('page-' + page);
+  if (el) { el.classList.add('active'); }
+  const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (nav) nav.classList.add('active');
+  app.currentPage = page;
+
+  // Load page content
+  const loaders = {
+    'dashboard': loadDashboard,
+    'global-markets': loadGlobalMarkets,
+    'commodities': loadCommodities,
+    'quant-models': loadQuantModels,
+    'macro': loadMacro,
+    'correlation': loadCorrelation,
+    'portfolio': loadPortfolio,
+    'backtest': loadBacktest,
+    'watchlist': loadWatchlist,
+  };
+  if (loaders[page]) loaders[page]();
+}
+
+function navigateToTicker(ticker) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-ticker').classList.add('active');
+  app.currentPage = 'ticker';
+  loadTickerPage(ticker);
+}
+
+// ── Search ──
+let searchTimeout;
+document.getElementById('globalSearch').addEventListener('input', function (e) {
+  clearTimeout(searchTimeout);
+  const q = e.target.value.trim();
+  if (q.length < 1) { document.getElementById('searchDropdown').classList.remove('active'); return; }
+  searchTimeout = setTimeout(async () => {
+    const data = await api('/search?q=' + encodeURIComponent(q));
+    const dd = document.getElementById('searchDropdown');
+    if (data.results && data.results.length) {
+      dd.innerHTML = data.results.map(r => `
+        <div class="search-result" onclick="document.getElementById('searchDropdown').classList.remove('active');document.getElementById('globalSearch').value='';navigateToTicker('${r.ticker}')">
+          <div class="sr-left"><span class="sr-ticker">${r.ticker}</span><span class="sr-name">${r.name}</span></div>
+          <span class="sr-type">${r.type}</span>
+        </div>`).join('');
+      dd.classList.add('active');
+    } else {
+      dd.innerHTML = '<div style="padding:12px;color:var(--text-muted);text-align:center">No results</div>';
+      dd.classList.add('active');
+    }
+  }, 200);
+});
+document.getElementById('globalSearch').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') {
+    const q = e.target.value.trim().toUpperCase();
+    if (q) { navigateToTicker(q); e.target.value = ''; document.getElementById('searchDropdown').classList.remove('active'); }
+  }
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-container')) document.getElementById('searchDropdown').classList.remove('active');
+});
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); document.getElementById('globalSearch').focus(); }
+});
+
+// ── Header Ticker ──
+async function updateHeaderTicker() {
+  const tickers = ['SPX', 'NDX', 'DJI', 'GOLD', 'OIL', 'US10Y', 'DXY', 'EURUSD'];
+  const data = await api('/market/overview');
+  if (!data) return;
+  app.marketData = data;
+  const el = document.getElementById('headerTicker');
+  el.innerHTML = tickers.map(t => {
+    const d = data[t];
+    if (!d) return '';
+    return `<div class="ticker-item">
+      <span class="ticker-name">${t}</span>
+      <span class="ticker-price">${fmt(d.price, d.price < 10 ? 4 : 2)}</span>
+      <span class="ticker-change ${d.changePct >= 0 ? 'up' : 'down'}">${fmtPct(d.changePct)}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Real-time tick ──
+async function doTick() {
+  try {
+    const updates = await api('/market/tick');
+    if (!updates) return;
+    // Update stored data
+    for (const [tk, d] of Object.entries(updates)) {
+      if (app.marketData[tk]) {
+        app.marketData[tk].price = d.price;
+        app.marketData[tk].change = d.change;
+        app.marketData[tk].changePct = d.changePct;
+      }
+    }
+    // Update visible price cells
+    document.querySelectorAll('[data-price-ticker]').forEach(el => {
+      const tk = el.dataset.priceTicker;
+      const d = updates[tk];
+      if (d) {
+        const old = parseFloat(el.textContent.replace(/,/g, ''));
+        el.textContent = fmt(d.price, d.price < 10 ? 4 : 2);
+        if (d.price > old) el.classList.add('flash-green');
+        else if (d.price < old) el.classList.add('flash-red');
+        setTimeout(() => { el.classList.remove('flash-green', 'flash-red'); }, 600);
+      }
+    });
+    document.querySelectorAll('[data-change-ticker]').forEach(el => {
+      const tk = el.dataset.changeTicker;
+      const d = updates[tk];
+      if (d) {
+        el.innerHTML = `<span class="${cls(d.changePct)}">${fmtPct(d.changePct)}</span>`;
+      }
+    });
+    // Update header ticker too
+    const tickers = ['SPX', 'NDX', 'DJI', 'GOLD', 'OIL', 'US10Y', 'DXY', 'EURUSD'];
+    const el = document.getElementById('headerTicker');
+    el.innerHTML = tickers.map(t => {
+      const d = updates[t] || app.marketData[t];
+      if (!d) return '';
+      return `<div class="ticker-item">
+        <span class="ticker-name">${t}</span>
+        <span class="ticker-price">${fmt(d.price, d.price < 10 ? 4 : 2)}</span>
+        <span class="ticker-change ${d.changePct >= 0 ? 'up' : 'down'}">${fmtPct(d.changePct)}</span>
+      </div>`;
+    }).join('');
+  } catch (e) { }
+}
+
+// ══════════════════════════════════════════════════════════
+// PAGE: Dashboard
+// ══════════════════════════════════════════════════════════
+async function loadDashboard() {
+  const [overview, macro] = await Promise.all([api('/market/overview'), api('/macro/data')]);
+  app.marketData = overview;
+
+  // Top KPIs
+  const kpis = ['SPX', 'NDX', 'GOLD', 'OIL', 'US10Y', 'VIX'];
+  const vixData = macro.VIX || { value: 13.82 };
+
+  const page = document.getElementById('page-dashboard');
+  page.innerHTML = `
+    <div class="section-header">
+      <div><div class="page-title">Market Dashboard</div><div class="page-desc">Real-time global market intelligence and analytics</div></div>
+      <div class="btn-group">
+        <button class="btn btn-outline btn-sm" onclick="loadDashboard()">Refresh</button>
+      </div>
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="grid-5" id="dash-kpis" style="margin-bottom:20px"></div>
+
+    <!-- Main charts row -->
+    <div class="grid-32" style="margin-bottom:16px">
+      <div class="card">
+        <div class="card-header"><span class="card-title">S&P 500 Index</span><span class="card-subtitle">1Y Daily</span></div>
+        <canvas id="dash-spx-chart"></canvas>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Macro Indicators</span><span class="card-subtitle">Latest</span></div>
+        <div id="dash-macro"></div>
+      </div>
+    </div>
+
+    <!-- Market tables -->
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Global Indices</span></div>
+        <table class="data-table" id="dash-indices"></table>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Commodities</span></div>
+        <table class="data-table" id="dash-commodities"></table>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Top Equities</span></div>
+        <table class="data-table" id="dash-equities"></table>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Currencies & Bonds</span></div>
+        <table class="data-table" id="dash-fx"></table>
+      </div>
+    </div>
+  `;
+
+  // KPIs
+  const kpiEl = document.getElementById('dash-kpis');
+  const kpiData = kpis.map(t => {
+    if (t === 'VIX') return { ticker: 'VIX', name: 'CBOE VIX', price: vixData.value, changePct: ((vixData.value - vixData.prev) / vixData.prev * 100) };
+    const d = overview[t];
+    return d ? { ticker: t, name: d.name, price: d.price, changePct: d.changePct } : null;
+  }).filter(Boolean);
+  kpiEl.innerHTML = kpiData.map(d => `
+    <div class="stat-card" onclick="navigateToTicker('${d.ticker}')">
+      <div class="stat-label">${d.name}</div>
+      <div class="stat-value" data-price-ticker="${d.ticker}">${fmt(d.price, d.price < 10 ? 4 : 2)}</div>
+      <div class="stat-change ${cls(d.changePct)}">${arrow(d.changePct)} ${fmtPct(d.changePct)}</div>
+    </div>`).join('');
+
+  // SPX Chart
+  const spxHist = await api('/asset/history?ticker=SPX');
+  if (spxHist.history) {
+    const tech = await api('/asset/technicals?ticker=SPX');
+    Charts.candlestick(document.getElementById('dash-spx-chart'), spxHist.history, {
+      sma20: tech.sma20, sma50: tech.sma50, height: 300
+    });
+  }
+
+  // Macro
+  const macroEl = document.getElementById('dash-macro');
+  macroEl.innerHTML = Object.values(macro).map(m => `
+    <div class="metric-row">
+      <span class="metric-label">${m.name}</span>
+      <span class="metric-value">
+        ${fmt(m.value, 2)}${m.unit}
+        <span class="${m.value < m.prev ? 'positive' : m.value > m.prev ? 'negative' : ''}" style="font-size:10px;margin-left:4px">
+          ${m.value !== m.prev ? (m.value < m.prev ? '&#9660;' : '&#9650;') : ''}
+        </span>
+      </span>
+    </div>`).join('');
+
+  // Tables helper
+  function fillTable(id, items) {
+    document.getElementById(id).innerHTML = `
+      <thead><tr><th>Ticker</th><th>Name</th><th class="right">Price</th><th class="right">Change</th></tr></thead>
+      <tbody>${items.map(d => `
+        <tr onclick="navigateToTicker('${d.ticker}')">
+          <td class="ticker-col">${d.ticker}</td>
+          <td class="name-col">${d.name}</td>
+          <td class="right price-col" data-price-ticker="${d.ticker}">${fmt(d.price, d.price < 10 ? 4 : 2)}</td>
+          <td class="right" data-change-ticker="${d.ticker}"><span class="${cls(d.changePct)}">${fmtPct(d.changePct)}</span></td>
+        </tr>`).join('')}</tbody>`;
+  }
+
+  const assets = Object.values(overview);
+  fillTable('dash-indices', assets.filter(a => a.type === 'index'));
+  fillTable('dash-commodities', assets.filter(a => a.type === 'commodity'));
+  fillTable('dash-equities', assets.filter(a => a.type === 'equity').slice(0, 10));
+  fillTable('dash-fx', assets.filter(a => a.type === 'currency' || a.type === 'bond'));
+}
+
+// ══════════════════════════════════════════════════════════
+// PAGE: Global Markets
+// ══════════════════════════════════════════════════════════
+async function loadGlobalMarkets() {
+  const data = await api('/market/overview');
+  const page = document.getElementById('page-global-markets');
+
+  const regions = {
+    'United States': ['SPX', 'NDX', 'DJI'],
+    'Europe': ['SX5E', 'FTSE', 'DAX'],
+    'Asia-Pacific': ['NKY', 'KOSPI', 'SHCOMP'],
+    'Emerging': ['NIFTY', 'TA125', 'EEM'],
+  };
+
+  page.innerHTML = `
+    <div class="section-header">
+      <div><div class="page-title">Global Markets</div><div class="page-desc">Real-time tracking of major indices and markets worldwide</div></div>
+    </div>
+    ${Object.entries(regions).map(([region, tickers]) => `
+      <div style="margin-bottom:20px">
+        <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--text-secondary)">${region}</div>
+        <div class="grid-3">
+          ${tickers.map(t => {
+            const d = data[t];
+            if (!d) return '';
+            return `<div class="stat-card" onclick="navigateToTicker('${t}')">
+              <div class="stat-label">${d.name}</div>
+              <div class="stat-value" data-price-ticker="${t}">${fmt(d.price, 2)}</div>
+              <div class="stat-change ${cls(d.changePct)}">${arrow(d.changePct)} ${fmtPct(d.changePct)}</div>
+              <div style="font-size:10px;color:var(--text-muted);margin-top:4px">${d.exchange}</div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`).join('')}
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">All Equities</span></div>
+      <table class="data-table">
+        <thead><tr><th>Ticker</th><th>Name</th><th>Exchange</th><th>Sector</th><th class="right">Price</th><th class="right">Change</th></tr></thead>
+        <tbody>${Object.values(data).filter(d => d.type === 'equity').map(d => `
+          <tr onclick="navigateToTicker('${d.ticker}')">
+            <td class="ticker-col">${d.ticker}</td><td class="name-col">${d.name}</td>
+            <td>${d.exchange}</td><td><span class="badge badge-blue">${d.sector}</span></td>
+            <td class="right price-col" data-price-ticker="${d.ticker}">${fmt(d.price, 2)}</td>
+            <td class="right" data-change-ticker="${d.ticker}"><span class="${cls(d.changePct)}">${fmtPct(d.changePct)}</span></td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════════════════════════
+// PAGE: Commodities
+// ══════════════════════════════════════════════════════════
+async function loadCommodities() {
+  const data = await api('/market/overview');
+  const page = document.getElementById('page-commodities');
+  const comms = Object.values(data).filter(d => d.type === 'commodity');
+
+  page.innerHTML = `
+    <div class="section-header">
+      <div><div class="page-title">Commodity Intelligence</div><div class="page-desc">Real-time commodity prices, supply/demand analysis, and macro sentiment</div></div>
+    </div>
+    <div class="grid-5" style="margin-bottom:20px">
+      ${comms.map(d => `
+        <div class="stat-card" onclick="navigateToTicker('${d.ticker}')">
+          <div class="stat-label">${d.name}</div>
+          <div class="stat-value" data-price-ticker="${d.ticker}">${fmt(d.price, d.price < 10 ? 4 : 2)}</div>
+          <div class="stat-change ${cls(d.changePct)}">${arrow(d.changePct)} ${fmtPct(d.changePct)}</div>
+          <div style="margin-top:8px">
+            <div style="font-size:10px;color:var(--text-muted)">Volatility</div>
+            <div class="progress-bar" style="margin-top:3px"><div class="progress-fill progress-blue" style="width:${d.vol * 200}%"></div></div>
+            <div style="font-size:10px;color:var(--text-secondary);margin-top:2px">${(d.vol * 100).toFixed(0)}%</div>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Commodity Prices</span></div>
+        <canvas id="comm-chart"></canvas>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Commodity Correlation</span></div>
+        <canvas id="comm-corr"></canvas>
+      </div>
+    </div>
+  `;
+
+  // Price chart for top commodity
+  const goldHist = await api('/asset/history?ticker=GOLD');
+  if (goldHist.history) {
+    Charts.candlestick(document.getElementById('comm-chart'), goldHist.history, { height: 280 });
+  }
